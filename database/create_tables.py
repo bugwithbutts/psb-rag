@@ -1,4 +1,4 @@
-from sqlalchemy import BigInteger, Integer, Text
+from sqlalchemy import BigInteger, Integer, Text, text
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 from pgvector.sqlalchemy import VECTOR
@@ -43,7 +43,9 @@ class ChunkModel(Base):
 
 
 def main():
-    Base.metadata.create_all(bind=engine)
+    with engine.begin() as connection:
+        connection.execute(text("CREATE EXTENSION IF NOT EXISTS vector"))
+        Base.metadata.create_all(bind=connection)
     print("Таблицы успешно созданы")
 
 

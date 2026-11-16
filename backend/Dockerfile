@@ -33,4 +33,5 @@ WORKDIR /app/backend
 
 EXPOSE 8000
 
+ENTRYPOINT ["/bin/sh", "/app/backend/docker-entrypoint.sh"]
 CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]

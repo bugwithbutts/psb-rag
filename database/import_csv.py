@@ -6,7 +6,6 @@ from sqlalchemy import func, select
 from rag.config import RAGConfig
 from database.connection import SessionLocal
 from database.create_tables import ChunkModel
-from database.repository import ChunkRepository
 
 
 def load_csv(path: str) -> pd.DataFrame:
@@ -52,8 +51,8 @@ def import_chunks(
     embedder = config.embedder
     batch_size = config.batch_size
 
-    with SessionLocal() as session:
-        repository = ChunkRepository(session)
+    # Весь импорт атомарен: при сбое следующий запуск повторит его целиком.
+    with SessionLocal.begin() as session:
 
         for start in range(0, len(df), batch_size):
 
@@ -97,10 +96,11 @@ def import_chunks(
                 )
 
             # 6. Сохраняем батч
-            repository.save_chunks(chunks)
+            session.add_all(chunks)
+            session.flush()
 
             print(
-                f"Сохранено: "
+                f"Подготовлено: "
                 f"{min(start + batch_size, len(df))}/{len(df)}"
             )
 
