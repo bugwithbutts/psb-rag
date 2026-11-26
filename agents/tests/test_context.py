@@ -295,7 +295,7 @@ class FormatContextTest(unittest.TestCase):
         self.assertIn("edition: 2024", formatted)
         self.assertIn("Текст нормы", formatted)
 
-    def test_includes_chunk_info_without_repeating_same_value(self) -> None:
+    def test_includes_context_info_without_repeating_same_value(self) -> None:
         chunks = [
             ContextChunk(
                 doc_id="doc-1",

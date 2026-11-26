@@ -27,13 +27,11 @@ from agents.dialog import history_records, queries_similar
 from agents.prompts import (
     GENERATE_SYSTEM_PROMPT,
     GRADE_SYSTEM_PROMPT,
-    REVISE_SYSTEM_PROMPT,
     REWRITE_SYSTEM_PROMPT,
     UNDERSTAND_SYSTEM_PROMPT,
     VERIFY_SYSTEM_PROMPT,
     generate_user_prompt,
     grade_user_prompt,
-    revise_user_prompt,
     rewrite_user_prompt,
     understand_user_prompt,
     verify_user_prompt,
@@ -42,7 +40,6 @@ from agents.state import (
     ClarificationRequest,
     ContextChunk,
     DialogTurn,
-    PremiseCheck,
     QuestionPart,
     RetrievalGradeResult,
     SubQuery,
@@ -61,7 +58,6 @@ __all__ = [
     "grade_retrieval",
     "no_data_answer",
     "out_of_scope_answer",
-    "revise_answer",
     "rewrite_subquery",
     "understand_query",
     "verify_answer",
@@ -123,7 +119,7 @@ def ensure_llm_configured(settings: Settings) -> None:
 def _build_llm(
     settings: Settings,
     *,
-    temperature: float | None = None,
+    temperature: float,
     max_tokens: int | None = None,
 ) -> ChatOpenAI:
     """Создать клиент ChatOpenAI по настройкам окружения."""
@@ -131,7 +127,7 @@ def _build_llm(
         "model": settings.llm_model,
         "api_key": settings.llm_api_key,
         "base_url": settings.llm_base_url,
-        "temperature": settings.temperature if temperature is None else temperature,
+        "temperature": temperature,
         "timeout": _LLM_TIMEOUT_SECONDS,
         "max_retries": _LLM_MAX_RETRIES,
     }
@@ -145,7 +141,7 @@ def _chat_completion(
     *,
     settings: Settings,
     messages: list[BaseMessage],
-    temperature: float | None = None,
+    temperature: float = 0.0,
     max_tokens: int | None = None,
     label: str = "llm",
     usage_sink: list[TokenUsage] | None = None,
@@ -283,13 +279,6 @@ def _as_text_list(value: Any) -> list[str]:
     return [str(item).strip() for item in _as_list(value) if str(item).strip()]
 
 
-def _premise_text(premise: PremiseCheck | None) -> str:
-    if premise is None or not premise.has_false_premise:
-        return ""
-    parts = [premise.false_premise.strip(), premise.explanation.strip()]
-    return " ".join(part for part in parts if part)
-
-
 def _normalize_clarification_data(data: dict[str, Any]) -> None:
     raw = data.get("clarification")
     clarification = dict(raw) if isinstance(raw, dict) else {}
@@ -408,7 +397,6 @@ def _fallback_understand(last_question: str) -> UnderstandResult:
         scope_reason="LLM недоступна, вопрос принят как есть.",
         is_complex=False,
         question_parts=[QuestionPart(id=1, text=question, kind="fact")],
-        premise_check=PremiseCheck(),
         subqueries=[
             SubQuery(
                 id=1,
@@ -427,8 +415,6 @@ def _normalize_understand(
     max_subqueries: int,
 ) -> UnderstandResult:
     standalone = (result.standalone_query or last_question or "").strip()
-    if not standalone:
-        standalone = (last_question or "").strip()
 
     parts: list[QuestionPart] = []
     for index, part in enumerate(result.question_parts, start=1):
@@ -476,7 +462,6 @@ def _normalize_understand(
         scope_reason=result.scope_reason,
         is_complex=result.is_complex,
         question_parts=parts,
-        premise_check=result.premise_check or PremiseCheck(),
         subqueries=subqueries,
         clarification=_normalize_clarification(result.clarification),
     )
@@ -499,11 +484,7 @@ def understand_query(
             )
         ),
         HumanMessage(
-            content=understand_user_prompt(
-                history_data,
-                last_user_question,
-                settings.max_subqueries,
-            )
+            content=understand_user_prompt(history_data, last_user_question)
         ),
     ]
     raw = _chat_completion(
@@ -540,7 +521,11 @@ def understand_query(
     if parsed is not None:
         return _normalize_understand(parsed, last_user_question, settings.max_subqueries)
 
-    if raw:
+    if not raw:
+        skipped = bool(usage_sink) and any(item.skipped for item in usage_sink)
+        if not skipped:
+            logger.warning("LLM вернула пустой ответ анализа вопроса. Используется fallback.")
+    else:
         logger.warning("LLM вернула анализ вопроса не в JSON-формате. Используется fallback.")
     return _fallback_understand(last_user_question)
 
@@ -555,8 +540,8 @@ def fallback_grade(
         grades.append(
             SubqueryGrade(
                 subquery_id=subquery.id,
-                coverage="full" if has_chunks else "none",
-                evidence_type="direct" if has_chunks else "none",
+                coverage="partial" if has_chunks else "none",
+                evidence_type="related" if has_chunks else "none",
                 missing_required_aspects=(
                     [] if has_chunks else ["Нет релевантных фрагментов."]
                 ),
@@ -853,9 +838,6 @@ def generate_answer(
     question: str,
     contexts: list[ContextChunk],
     history: list[DialogTurn],
-    premise_check: PremiseCheck | None,
-    coverage: str,
-    missing_aspects: list[str],
     *,
     settings: Settings,
     usage_sink: list[TokenUsage] | None = None,
@@ -867,16 +849,12 @@ def generate_answer(
         return no_data_answer(question)
 
     history_data = history_records(history, settings.history_limit)
-    premise = _premise_text(premise_check)
     messages = [
         SystemMessage(content=GENERATE_SYSTEM_PROMPT),
         HumanMessage(
             content=generate_user_prompt(
                 question,
                 history_data,
-                premise,
-                coverage,
-                missing_aspects,
                 context_text,
             )
         ),
@@ -897,7 +875,7 @@ def generate_answer(
         and usage_sink[usage_start].skipped
     ):
         return no_data_answer(question)
-    return answer or context_text
+    return answer or no_data_answer(question)
 
 
 def _known_sources(contexts: list[ContextChunk]) -> set[str]:
@@ -985,7 +963,6 @@ def verify_answer(
     question: str,
     answer: str,
     contexts: list[ContextChunk],
-    premise_check: PremiseCheck | None,
     *,
     settings: Settings,
     usage_sink: list[TokenUsage] | None = None,
@@ -1014,7 +991,6 @@ def verify_answer(
                 question,
                 answer,
                 context_text,
-                _premise_text(premise_check),
             )
         ),
     ]
@@ -1095,44 +1071,3 @@ def verify_answer(
         parsed = parsed.model_copy(update={"verdict": "revise_answer"})
 
     return parsed
-
-
-def revise_answer(
-    question: str,
-    answer: str,
-    contexts: list[ContextChunk],
-    verification: VerificationResult | None,
-    *,
-    settings: Settings,
-    usage_sink: list[TokenUsage] | None = None,
-    budget_remaining: int | None = None,
-) -> str:
-    """Исправить черновик ответа по замечаниям проверяющего."""
-    context_text = format_context(contexts)
-    if not context_text:
-        return no_data_answer(question)
-
-    verification_data = (
-        verification.model_dump() if verification is not None else None
-    )
-    messages = [
-        SystemMessage(content=REVISE_SYSTEM_PROMPT),
-        HumanMessage(
-            content=revise_user_prompt(
-                question,
-                answer,
-                context_text,
-                verification_data,
-            )
-        ),
-    ]
-    revised = _chat_completion(
-        settings=settings,
-        messages=messages,
-        temperature=0.0,
-        max_tokens=600,
-        label="revise",
-        usage_sink=usage_sink,
-        budget_remaining=budget_remaining,
-    )
-    return revised or answer

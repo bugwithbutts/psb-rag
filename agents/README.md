@@ -29,7 +29,7 @@ from agents.bootstrap import build_local_service
 
 # RAG уже построен внешним кодом/сервисом
 service = build_local_service(rag)
-print(service.answer("u-1", "Какие налоги платит ИП?"))
+print(service.answer("Какие налоги платит ИП?"))
 ```
 
 ## Как работает агент
@@ -39,7 +39,6 @@ parse_dialog -> understand -> clarify
     -> retrieve -> grade -> clarify
     -> generate -> verify -> finalize
     -> rewrite -> retrieve
-    -> revise -> verify
     -> refuse
 ```
 
@@ -54,7 +53,6 @@ parse_dialog -> understand -> clarify
   или неоднозначный.
 - `rewrite` переформулирует только проблемные подзапросы.
 - `verify` проверяет заземлённость, ссылки и ответ на вопрос.
-- `revise` исправляет черновик без нового поиска.
 - Если подтверждённых сведений нет, агент честно отказывается отвечать.
 
 `AgentResult.status` принимает значения `answered`, `partial`, `refused`,
@@ -64,20 +62,15 @@ parse_dialog -> understand -> clarify
 Лимиты задаются переменными окружения:
 
 - `MAX_SUBQUERIES` (по умолчанию `4`)
-- `MAX_RETRIEVAL_ATTEMPTS` (`2`)
+- `MAX_RETRIEVAL_ATTEMPTS` (`5`) — сколько поисков разрешено на подзапрос
 - `MAX_ANSWER_ATTEMPTS` (`2`)
-- `MAX_TOTAL_LLM_CALLS` (`8`)
-- `MAX_REWRITE_SUBQUERIES_PER_ROUND` (`2`) — сколько проблемных
+- `MAX_TOTAL_LLM_CALLS` (`30`)
+- `MAX_REWRITE_SUBQUERIES_PER_ROUND` (`4`) — сколько проблемных
   подзапросов переформулировать за один раунд.
-- `MAX_MERGED_CHUNKS` (`8`)
-- `MAX_GRADE_CONTEXT_CHARS` (`4000`) — контекст для промпта-оценщика.
-- `MAX_ANSWER_CONTEXT_CHARS` (`5000`) — контекст для генерации, проверки и
-  исправления ответа. Старая переменная `MAX_CONTEXT_CHARS` используется как
-  fallback, если новая не задана.
-- `MAX_TOTAL_TOKENS_PER_QUESTION` (`20000`) — жёсткий бюджет токенов на
+- `MAX_TOTAL_TOKENS_PER_QUESTION` (`40000`) — жёсткий бюджет токенов на
   один вопрос.
-- `MAX_TOTAL_TOKENS_SOFT` (`15000`) — после этого порога отключаются
-  необязательные циклы `rewrite` и `revise`.
+- `MAX_TOTAL_TOKENS_SOFT` (`30000`) — после этого порога отключаются
+  необязательные циклы `rewrite`.
 - `HISTORY_LIMIT` (`8`)
 
 Расход токенов учитывается в `used_tokens`. Если провайдер вернул

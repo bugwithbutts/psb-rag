@@ -7,26 +7,20 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Annotated, Any, Literal, TypedDict
+from typing import Any, Literal, TypedDict
 
-from langchain_core.messages import AnyMessage
-from langgraph.graph.message import add_messages
 from pydantic import BaseModel, Field
 
 __all__ = [
-    "AgentEvent",
     "AgentResult",
     "AgentState",
     "ClarificationRequest",
     "ContextChunk",
     "DialogTurn",
-    "DoneEvent",
-    "PremiseCheck",
     "QuestionPart",
     "RetrievalGradeResult",
     "SubQuery",
     "SubqueryGrade",
-    "TokenEvent",
     "UnderstandResult",
     "VerificationResult",
 ]
@@ -59,14 +53,6 @@ class QuestionPart(BaseModel):
     kind: str = "fact"
 
 
-class PremiseCheck(BaseModel):
-    """Проверка ложных предпосылок в вопросе."""
-
-    has_false_premise: bool = False
-    false_premise: str = ""
-    explanation: str = ""
-
-
 class SubQuery(BaseModel):
     """Поисковый подзапрос, порождённый декомпозицией вопроса."""
 
@@ -81,7 +67,7 @@ class SubQuery(BaseModel):
     missing_required_aspects: list[str] = Field(default_factory=list)
     missing_optional_details: list[str] = Field(default_factory=list)
     unsupported_user_assumptions: list[str] = Field(default_factory=list)
-    query_variants: list[str] = Field(default_factory=list)
+    tried_queries: list[str] = Field(default_factory=list)
     attempts: int = 0
 
 
@@ -115,7 +101,6 @@ class UnderstandResult(BaseModel):
     scope_reason: str = ""
     is_complex: bool = False
     question_parts: list[QuestionPart] = Field(default_factory=list)
-    premise_check: PremiseCheck = Field(default_factory=PremiseCheck)
     subqueries: list[SubQuery] = Field(default_factory=list)
     clarification: ClarificationRequest = Field(default_factory=ClarificationRequest)
 
@@ -169,36 +154,22 @@ class AgentState(TypedDict, total=False):
     ``total=False`` означает, что узлы и входные данные могут заполнять
     только часть полей: LangGraph сам объединит частичные обновления с
     текущим состоянием.
-
-    ``messages`` снабжено reducer'ом ``add_messages``: новый узел не
-    перезаписывает историю, а добавляет сообщения к ней.
     """
 
-    messages: Annotated[list[AnyMessage], add_messages]
-    raw_input: str
     query: str
     history: list[DialogTurn]
     last_user_question: str
     standalone_query: str
     in_scope: bool
-    scope_reason: str
-    is_complex: bool
-    question_parts: list[QuestionPart]
-    premise_check: PremiseCheck | None
     clarification: ClarificationRequest | None
     subqueries: list[SubQuery]
     contexts: list[ContextChunk]
     coverage: Coverage
-    evidence_type: EvidenceType
-    missing_aspects: list[str]
     missing_required_aspects: list[str]
-    missing_optional_details: list[str]
-    unsupported_user_assumptions: list[str]
     retrieval_attempts: int
     answer_attempts: int
     total_steps: int
     used_tokens: int
-    tried_queries: list[str]
     answer_draft: str
     verification: VerificationResult | None
     answer: str
@@ -212,20 +183,3 @@ class AgentResult:
     answer: str
     status: Literal["answered", "partial", "refused", "clarification"] = "answered"
     clarification: ClarificationRequest | None = None
-
-
-class TokenEvent(TypedDict):
-    """Очередной фрагмент ответа для SSE-события ``token``."""
-
-    type: Literal["token"]
-    text: str
-
-
-class DoneEvent(TypedDict):
-    """Финальное событие потока."""
-
-    type: Literal["done"]
-    answer: str
-
-
-AgentEvent = TokenEvent | DoneEvent

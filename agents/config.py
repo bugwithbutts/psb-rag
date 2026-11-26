@@ -64,19 +64,6 @@ def _env_int_optional(name: str) -> int | None:
         raise ValueError(f"Переменная {name} должна быть целым числом, получено: {raw!r}") from exc
 
 
-def _env_float_first(*names: str, default: float) -> float:
-    """Вернуть первое непустое число из набора имён env."""
-    for name in names:
-        raw = os.getenv(name)
-        if raw is None or not raw.strip():
-            continue
-        try:
-            return float(raw)
-        except ValueError as exc:
-            raise ValueError(f"Переменная {name} должна быть числом, получено: {raw!r}") from exc
-    return default
-
-
 @dataclass(frozen=True)
 class Settings:
     """Иммутабельная конфигурация агента.
@@ -93,55 +80,38 @@ class Settings:
         Имя модели для чата. Не фиксируется в коде: берётся из env.
     llm_max_tokens:
         Ограничение длины ответа. ``None`` означает значение провайдера.
-    max_rewrites:
-        Устаревший параметр, оставлен для совместимости окружений.
     max_subqueries:
         Максимальное число подзапросов после декомпозиции.
     max_retrieval_attempts:
-        Сколько раз разрешено выполнять retrieval с переформулировкой.
+        Сколько поисков разрешено на подзапрос.
     max_answer_attempts:
         Сколько черновиков ответа разрешено сгенерировать.
     max_total_llm_calls:
         Общий предохранитель на число LLM-вызовов в одном ответе.
     max_rewrite_subqueries_per_round:
         Сколько проблемных подзапросов разрешено переформулировать за раунд.
-    max_merged_chunks:
-        Устаревший параметр совместимости. Результаты больше не обрезаются.
-    max_grade_context_chars:
-        Устаревший параметр совместимости. Контекст grader не обрезается.
-    max_answer_context_chars:
-        Устаревший параметр совместимости. Контекст ответа не обрезается.
     max_total_tokens_per_question:
         Жёсткий бюджет токенов на один вопрос (input + output).
     max_total_tokens_soft:
-        Порог, после которого отключаются необязательные циклы rewrite/revise.
+        Порог, после которого отключаются необязательные циклы rewrite.
     history_limit:
         Сколько последних сообщений передавать в промпт.
-    temperature:
-        Температура генерации. Для юридических ответов по умолчанию 0.
     """
 
     llm_base_url: str = ""
     llm_api_key: str = field(default="", repr=False)
     llm_model: str = ""
     llm_max_tokens: int | None = None
-    max_rewrites: int = 2
     max_subqueries: int = 4
-    max_retrieval_attempts: int = 2
+    max_retrieval_attempts: int = 5
     max_answer_attempts: int = 2
-    max_total_llm_calls: int = 8
-    max_rewrite_subqueries_per_round: int = 2
-    max_merged_chunks: int = 8
-    max_grade_context_chars: int = 4000
-    max_answer_context_chars: int = 10000
-    max_total_tokens_per_question: int = 50000
-    max_total_tokens_soft: int = 25000
+    max_total_llm_calls: int = 30
+    max_rewrite_subqueries_per_round: int = 4
+    max_total_tokens_per_question: int = 40000
+    max_total_tokens_soft: int = 30000
     history_limit: int = 8
-    temperature: float = 0.0
 
     def __post_init__(self) -> None:
-        if self.max_rewrites < 0:
-            raise ValueError("MAX_REWRITES не может быть отрицательным")
         if self.max_subqueries <= 0:
             raise ValueError("MAX_SUBQUERIES должен быть больше нуля")
         if self.max_retrieval_attempts <= 0:
@@ -154,12 +124,6 @@ class Settings:
             raise ValueError(
                 "MAX_REWRITE_SUBQUERIES_PER_ROUND должен быть больше нуля"
             )
-        if self.max_merged_chunks <= 0:
-            raise ValueError("MAX_MERGED_CHUNKS должен быть больше нуля")
-        if self.max_grade_context_chars <= 0:
-            raise ValueError("MAX_GRADE_CONTEXT_CHARS должен быть больше нуля")
-        if self.max_answer_context_chars <= 0:
-            raise ValueError("MAX_ANSWER_CONTEXT_CHARS должен быть больше нуля")
         if self.max_total_tokens_per_question <= 0:
             raise ValueError(
                 "MAX_TOTAL_TOKENS_PER_QUESTION должен быть больше нуля"
@@ -173,8 +137,6 @@ class Settings:
             )
         if self.history_limit <= 0:
             raise ValueError("HISTORY_LIMIT должен быть больше нуля")
-        if self.temperature < 0:
-            raise ValueError("LLM_TEMPERATURE не может быть отрицательной")
         if self.llm_max_tokens is not None and self.llm_max_tokens <= 0:
             raise ValueError("MAX_TOKENS должен быть больше нуля")
 
@@ -187,24 +149,16 @@ def get_settings() -> Settings:
         llm_api_key=_env_first("LLM_API_KEY", "OPENAI_API_KEY", default=""),
         llm_model=_env_first("LLM_MODEL", "OPENAI_MODEL", "GEN_MODEL", default=""),
         llm_max_tokens=_env_int_optional("MAX_TOKENS"),
-        max_rewrites=_env_int("MAX_REWRITES", 2),
         max_subqueries=_env_int("MAX_SUBQUERIES", 4),
-        max_retrieval_attempts=_env_int("MAX_RETRIEVAL_ATTEMPTS", 2),
+        max_retrieval_attempts=_env_int("MAX_RETRIEVAL_ATTEMPTS", 5),
         max_answer_attempts=_env_int("MAX_ANSWER_ATTEMPTS", 2),
-        max_total_llm_calls=_env_int("MAX_TOTAL_LLM_CALLS", 8),
+        max_total_llm_calls=_env_int("MAX_TOTAL_LLM_CALLS", 30),
         max_rewrite_subqueries_per_round=_env_int(
-            "MAX_REWRITE_SUBQUERIES_PER_ROUND", 2
-        ),
-        max_merged_chunks=_env_int("MAX_MERGED_CHUNKS", 8),
-        max_grade_context_chars=_env_int("MAX_GRADE_CONTEXT_CHARS", 4000),
-        max_answer_context_chars=_env_int(
-            "MAX_ANSWER_CONTEXT_CHARS",
-            _env_int("MAX_CONTEXT_CHARS", 5000),
+            "MAX_REWRITE_SUBQUERIES_PER_ROUND", 4
         ),
         max_total_tokens_per_question=_env_int(
-            "MAX_TOTAL_TOKENS_PER_QUESTION", 20000
+            "MAX_TOTAL_TOKENS_PER_QUESTION", 40000
         ),
-        max_total_tokens_soft=_env_int("MAX_TOTAL_TOKENS_SOFT", 15000),
+        max_total_tokens_soft=_env_int("MAX_TOTAL_TOKENS_SOFT", 30000),
         history_limit=_env_int("HISTORY_LIMIT", 8),
-        temperature=_env_float_first("TEMPERATURE", "LLM_TEMPERATURE", default=0.0),
     )

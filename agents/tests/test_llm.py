@@ -11,12 +11,12 @@ from agents.llm import (
     _chat_completion,
     generate_answer,
     grade_retrieval,
-    revise_answer,
     rewrite_subquery,
     understand_query,
     verify_answer,
 )
-from agents.state import ContextChunk, DialogTurn, PremiseCheck, SubQuery
+from agents.prompts import UNDERSTAND_SYSTEM_PROMPT
+from agents.state import ContextChunk, DialogTurn, SubQuery
 
 
 def make_settings(**overrides) -> Settings:
@@ -24,7 +24,6 @@ def make_settings(**overrides) -> Settings:
         "llm_base_url": "http://llm.local/v1",
         "llm_api_key": "test-key",
         "llm_model": "test-model",
-        "temperature": 0.0,
     }
     data.update(overrides)
     return Settings(**data)
@@ -51,9 +50,6 @@ class UnderstandQueryTest(unittest.TestCase):
             '{"standalone_query":"Какие налоги платит ИП по договору № 1?",'
             '"in_scope":true,"scope_reason":"налоги","is_complex":true,'
             '"question_parts":[{"id":1,"text":"налоги","kind":"fact"}],'
-            '"premise_check":{"has_false_premise":true,'
-            '"false_premise":"ИП не платит налоги",'
-            '"explanation":"ИП платит"},'
             '"subqueries":['
             '{"id":1,"text":"налоги ИП","part_ids":[1],"kind":"fact"},'
             '{"id":2,"text":"срок уплаты налогов ИП","part_ids":[1],"kind":"fact"}]}'
@@ -68,7 +64,76 @@ class UnderstandQueryTest(unittest.TestCase):
         self.assertEqual(result.standalone_query, "Какие налоги платит ИП по договору № 1?")
         self.assertTrue(result.is_complex)
         self.assertEqual(len(result.subqueries), 2)
-        self.assertTrue(result.premise_check.has_false_premise)
+
+    def test_accepts_prompt_shaped_json(self) -> None:
+        self.assertIn('"standalone_query"', UNDERSTAND_SYSTEM_PROMPT)
+        self.assertIn('"is_complex"', UNDERSTAND_SYSTEM_PROMPT)
+        self.assertNotIn('"premise_check"', UNDERSTAND_SYSTEM_PROMPT)
+        self.assertIn("ШАГ 4. Разбей вопрос на подзапросы.", UNDERSTAND_SYSTEM_PROMPT)
+        self.assertIn("ШАГ 1. Сформируй standalone_query.", UNDERSTAND_SYSTEM_PROMPT)
+        self.assertIn("всей истории", UNDERSTAND_SYSTEM_PROMPT)
+        self.assertIn('" Контекст:', UNDERSTAND_SYSTEM_PROMPT)
+        self.assertIn("ШАГ 2. Определи in_scope.", UNDERSTAND_SYSTEM_PROMPT)
+        self.assertIn(" Отсутствие данных — задача поиска", UNDERSTAND_SYSTEM_PROMPT)
+        self.assertIn(
+            "ШАГ 3. Реши, нужно ли уточнение до поиска.",
+            UNDERSTAND_SYSTEM_PROMPT,
+        )
+        self.assertIn(
+            "критичной сущности нет ни в последнем вопросе",
+            UNDERSTAND_SYSTEM_PROMPT,
+        )
+        raw = (
+            '{"standalone_query":"Какие налоги платит ИП?",'
+            '"in_scope":true,"scope_reason":"налоги","is_complex":true,'
+            '"clarification":{"needed":false,"question":"","reason":""},'
+            '"subqueries":['
+            '{"id":1,"text":"налоги ИП"},'
+            '{"id":2,"text":"сроки уплаты налогов ИП"}]}'
+        )
+        with patch("agents.llm._chat_completion", new=Mock(return_value=raw)):
+            result = understand_query(
+                [DialogTurn(role="user", text="Я ИП")],
+                "Какие налоги?",
+                settings=make_settings(),
+            )
+
+        self.assertEqual(result.standalone_query, "Какие налоги платит ИП?")
+        self.assertEqual(len(result.subqueries), 2)
+
+    def test_preserves_entity_context_tail(self) -> None:
+        raw = (
+            '{"standalone_query":"Какие сроки уплаты НДС? Контекст: '
+            'договор № A-08/2024; ООО «Ромашка»; аренда склада.",'
+            '"in_scope":true,"scope_reason":"налоги","is_complex":false,'
+            '"subqueries":[{"id":1,"text":"сроки уплаты НДС"}]}'
+        )
+        with patch("agents.llm._chat_completion", new=Mock(return_value=raw)):
+            result = understand_query(
+                [
+                    DialogTurn(
+                        role="user",
+                        text="Договор № A-08/2024 с ООО «Ромашка» на аренду склада.",
+                    )
+                ],
+                "Какие сроки уплаты НДС?",
+                settings=make_settings(),
+            )
+
+        self.assertEqual(
+            result.standalone_query,
+            "Какие сроки уплаты НДС? Контекст: договор № A-08/2024; "
+            "ООО «Ромашка»; аренда склада.",
+        )
+        self.assertEqual(result.subqueries[0].text, "сроки уплаты НДС")
+
+    def test_empty_response_logs_fallback_reason(self) -> None:
+        with patch("agents.llm._chat_completion", new=Mock(return_value="")):
+            with self.assertLogs("agents.llm", level="WARNING") as captured:
+                result = understand_query([], "налоги", settings=make_settings())
+
+        self.assertEqual(result.standalone_query, "налоги")
+        self.assertTrue(any("пустой ответ" in line for line in captured.output))
 
     def test_simple_question_keeps_one_subquery(self) -> None:
         raw = (
@@ -203,7 +268,7 @@ class GradeRetrievalTest(unittest.TestCase):
                 settings=make_settings(),
             )
 
-        self.assertEqual(result.overall, "full")
+        self.assertEqual(result.overall, "partial")
 
 
 class RewriteSubqueryTest(unittest.TestCase):
@@ -251,28 +316,22 @@ class GenerateAnswerTest(unittest.TestCase):
                 "вопрос",
                 [make_context()],
                 [],
-                PremiseCheck(),
-                "full",
-                [],
                 settings=make_settings(),
             )
 
         self.assertEqual(answer, "Ответ LLM")
 
-    def test_falls_back_to_context_when_llm_empty(self) -> None:
+    def test_returns_no_data_when_llm_empty(self) -> None:
         with patch("agents.llm._chat_completion", new=Mock(return_value="")):
             answer = generate_answer(
                 "вопрос",
                 [make_context()],
                 [],
-                PremiseCheck(),
-                "full",
-                [],
                 settings=make_settings(),
             )
 
-        self.assertIn("doc-1", answer)
-        self.assertIn("налог", answer)
+        self.assertIn("нет документов", answer)
+        self.assertNotIn("налог", answer)
 
     def test_empty_context_does_not_call_llm(self) -> None:
         completion = Mock(return_value="Ответ LLM")
@@ -280,9 +339,6 @@ class GenerateAnswerTest(unittest.TestCase):
             answer = generate_answer(
                 "вопрос",
                 [],
-                [],
-                PremiseCheck(),
-                "none",
                 [],
                 settings=make_settings(),
             )
@@ -303,7 +359,6 @@ class VerifyAnswerTest(unittest.TestCase):
                 "вопрос",
                 "Ответ [doc_id: doc-1]",
                 [make_context()],
-                PremiseCheck(),
                 settings=make_settings(),
             )
 
@@ -320,7 +375,6 @@ class VerifyAnswerTest(unittest.TestCase):
                 "вопрос",
                 "Ответ",
                 [make_context()],
-                PremiseCheck(),
                 settings=make_settings(),
             )
 
@@ -333,7 +387,6 @@ class VerifyAnswerTest(unittest.TestCase):
                 "вопрос",
                 "Ответ [doc_id: doc-999]",
                 [make_context()],
-                PremiseCheck(),
                 settings=make_settings(),
             )
 
@@ -347,85 +400,11 @@ class VerifyAnswerTest(unittest.TestCase):
                 "вопрос",
                 "Ответ",
                 [],
-                PremiseCheck(),
                 settings=make_settings(),
             )
 
         self.assertEqual(result.verdict, "refuse")
         completion.assert_not_called()
-
-
-class ReviseAnswerTest(unittest.TestCase):
-    def test_returns_revised_answer(self) -> None:
-        with patch("agents.llm._chat_completion", new=Mock(return_value="Исправлено")):
-            result = revise_answer(
-                "вопрос",
-                "Черновик",
-                [make_context()],
-                None,
-                settings=make_settings(),
-            )
-
-        self.assertEqual(result, "Исправлено")
-
-    def test_empty_context_returns_no_data_answer(self) -> None:
-        completion = Mock(return_value="Исправлено")
-        with patch("agents.llm._chat_completion", new=completion):
-            result = revise_answer(
-                "вопрос",
-                "Черновик",
-                [],
-                None,
-                settings=make_settings(),
-            )
-
-        self.assertIn("нет документов", result)
-        completion.assert_not_called()
-
-
-class ContextLimitTest(unittest.TestCase):
-    def _context(self, text: str) -> ContextChunk:
-        return ContextChunk(
-            doc_id="doc-1",
-            chunk_id="chunk-1",
-            text=text,
-            metadata={},
-            subquery_ids=[1],
-        )
-
-    def test_grade_uses_grade_context_limit(self) -> None:
-        raw = '{"subqueries":[],"overall":"none","missing_aspects":[]}'
-        completion = Mock(return_value=raw)
-        chunk = self._context("Начало " + "Т" * 500 + " ХВОСТ")
-
-        with patch("agents.llm._chat_completion", new=completion):
-            grade_retrieval(
-                "вопрос",
-                [make_subquery()],
-                [chunk],
-                settings=make_settings(max_grade_context_chars=100),
-            )
-
-        messages = completion.call_args.kwargs["messages"]
-        self.assertIn("ХВОСТ", messages[1].content)
-
-    def test_generate_uses_answer_context_limit(self) -> None:
-        completion = Mock(return_value="Ответ")
-        chunk = self._context("Начало " + "Т" * 500 + " ХВОСТ")
-
-        with patch("agents.llm._chat_completion", new=completion):
-            generate_answer(
-                "вопрос",
-                [chunk],
-                [],
-                PremiseCheck(),
-                "full",
-                [],
-                settings=make_settings(max_answer_context_chars=100),
-            )
-
-        messages = completion.call_args.kwargs["messages"]
-        self.assertIn("ХВОСТ", messages[1].content)
 
 
 class ChatCompletionTest(unittest.TestCase):

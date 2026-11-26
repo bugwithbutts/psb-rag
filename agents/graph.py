@@ -2,14 +2,12 @@
 
 from __future__ import annotations
 
-from langgraph.checkpoint.base import BaseCheckpointSaver
 from langgraph.graph import END, START, StateGraph
 from langgraph.graph.state import CompiledStateGraph
 
 from agents.config import Settings
 from agents.nodes import (
     make_clarify_node,
-    make_expand_query_node,
     make_finalize_node,
     make_generate_node,
     make_grade_node,
@@ -32,9 +30,8 @@ __all__ = ["build_graph"]
 def build_graph(
     rag_client: RAG,
     settings: Settings,
-    checkpointer: BaseCheckpointSaver | None = None,
 ) -> CompiledStateGraph:
-    """Собрать production-граф с retrieval expansion и controlled finalize.
+    """Собрать production-граф с переформулировкой запроса и controlled finalize.
 
     Текущая схема:
 
@@ -45,7 +42,7 @@ def build_graph(
              -> clarify  -> END
              -> retrieve
                 -> grade
-                   -> rewrite  -> expand -> rewrite -> retrieve
+                   -> rewrite  -> retrieve
                    -> generate -> verify -> finalize -> END
                    -> clarify  -> END
                    -> finalize -> END
@@ -53,9 +50,8 @@ def build_graph(
     graph = StateGraph(AgentState)
     graph.add_node("parse_dialog", make_parse_dialog_node())
     graph.add_node("understand", make_understand_node(settings))
-    graph.add_node("retrieve", make_retrieve_node(rag_client, settings))
+    graph.add_node("retrieve", make_retrieve_node(rag_client))
     graph.add_node("grade", make_grade_node(settings))
-    graph.add_node("expand", make_expand_query_node())
     graph.add_node("rewrite", make_rewrite_node(settings))
     graph.add_node("generate", make_generate_node(settings))
     graph.add_node("verify", make_verify_node(settings))
@@ -80,12 +76,11 @@ def build_graph(
         lambda state: route_after_grade(state, settings),
         {
             "generate": "generate",
-            "rewrite": "expand",
+            "rewrite": "rewrite",
             "finalize": "finalize",
             "clarify": "clarify",
         },
     )
-    graph.add_edge("expand", "rewrite")
     graph.add_edge("rewrite", "retrieve")
     graph.add_edge("generate", "verify")
     graph.add_conditional_edges(
@@ -100,4 +95,4 @@ def build_graph(
     graph.add_edge("finalize", END)
     graph.add_edge("refuse", END)
 
-    return graph.compile(checkpointer=checkpointer)
+    return graph.compile()

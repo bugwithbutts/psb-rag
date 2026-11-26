@@ -7,7 +7,6 @@ from unittest.mock import Mock, patch
 from agents.config import Settings
 from agents.service import AgentService
 from agents.state import (
-    PremiseCheck,
     RetrievalGradeResult,
     SubQuery,
     SubqueryGrade,
@@ -40,7 +39,6 @@ def make_understand(question: str) -> UnderstandResult:
         in_scope=True,
         scope_reason="тест",
         is_complex=False,
-        premise_check=PremiseCheck(),
         subqueries=[
             SubQuery(id=1, text=question, part_ids=[1], kind="fact", required=True)
         ],
@@ -103,8 +101,7 @@ class BatchSyncTest(unittest.TestCase):
             service = AgentService(rag, settings=settings)
             with ThreadPoolExecutor(max_workers=4) as pool:
                 futures = [
-                    pool.submit(service.answer, str(index), question)
-                    for index, question in enumerate(questions)
+                    pool.submit(service.answer, question) for question in questions
                 ]
                 answers = [future.result() for future in futures]
 

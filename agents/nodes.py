@@ -1,5 +1,6 @@
 """Узлы агентского графа.
 
+
 Узлы — обычные функции: получают состояние и возвращают только изменённые
 поля. Вся тяжёлая работа делегируется RAG и функциям из ``llm.py``.
 """
@@ -10,8 +11,6 @@ import logging
 import re
 from collections.abc import Callable
 from typing import Any
-
-from langchain_core.messages import AIMessage
 
 from agents.clarification import (
     detect_context_ambiguity,
@@ -39,7 +38,6 @@ from rag.rag_pipeline import RAG
 
 __all__ = [
     "make_clarify_node",
-    "make_expand_query_node",
     "make_finalize_node",
     "make_generate_node",
     "make_grade_node",
@@ -110,16 +108,9 @@ def make_parse_dialog_node() -> Node:
     """Создать узел детерминированного разбора истории диалога."""
 
     def parse_dialog_node(state: AgentState) -> dict[str, Any]:
-        raw_input = (
-            state.get("raw_input")
-            or state.get("query")
-            or ""
-        ).strip()
-        history, last_question = parse_dialog(raw_input)
-        if not last_question:
-            last_question = (state.get("query") or "").strip()
+        question = (state.get("query") or "").strip()
+        history, last_question = parse_dialog(question)
         return {
-            "raw_input": raw_input,
             "history": history,
             "last_user_question": last_question,
             "query": last_question,
@@ -145,9 +136,7 @@ def make_understand_node(settings: Settings) -> Node:
             usage_sink=usage,
             budget_remaining=_budget_remaining(state, settings),
         )
-        subqueries = [
-            subquery.model_copy(deep=True) for subquery in result.subqueries
-        ]
+        subqueries = list(result.subqueries)
         clarification = result.clarification
         if clarification.needed and last_assistant_asked_question(
             state.get("history") or []
@@ -155,34 +144,21 @@ def make_understand_node(settings: Settings) -> Node:
             clarification = clarification.model_copy(
                 update={"needed": False, "question": ""}
             )
+        step_increment = 1 if any(not item.skipped for item in usage) else 0
         return {
             "query": last_question,
             "standalone_query": result.standalone_query,
             "in_scope": result.in_scope,
-            "scope_reason": result.scope_reason,
-            "is_complex": result.is_complex,
-            "question_parts": result.question_parts,
-            "premise_check": result.premise_check,
             "clarification": clarification,
             "subqueries": subqueries,
             "contexts": [],
-            "tried_queries": [],
             "retrieval_attempts": 0,
             "answer_attempts": 0,
-            "total_steps": state.get("total_steps", 0) + 1,
+            "total_steps": state.get("total_steps", 0) + step_increment,
             "used_tokens": _add_usage(state, usage),
         }
 
     return understand
-
-
-def _retrieval_queries(subquery: SubQuery) -> list[str]:
-    queries: list[str] = []
-    for value in [subquery.text, *subquery.query_variants]:
-        query = (value or "").strip()
-        if query and query not in queries:
-            queries.append(query)
-    return queries
 
 
 def _interleave_chunks(groups: list[list[Any]]) -> list[Any]:
@@ -207,36 +183,22 @@ def _interleave_chunks(groups: list[list[Any]]) -> list[Any]:
     return result
 
 
-def make_expand_query_node() -> Node:
-    """Сохранить узел совместимости без добавления generic-запросов.
-
-    Переформулировкой занимается ``make_rewrite_node``: он сохраняет
-    исходный запрос и добавляет конкретику из ``missing_aspects`` через LLM.
-    Универсальные юридические клише здесь намеренно не добавляются, чтобы
-    не размывать retrieval.
-    """
-
-    def expand_query(state: AgentState) -> dict[str, Any]:
-        return {"subqueries": list(_subqueries(state))}
-
-    return expand_query
-
-
-def make_retrieve_node(rag: RAG, settings: Settings) -> Node:
+def make_retrieve_node(rag: RAG) -> Node:
     """Создать узел поиска в RAG по всем подзапросам."""
 
     def retrieve(state: AgentState) -> dict[str, Any]:
         subqueries = _subqueries(state)
-        tried_queries = list(state.get("tried_queries") or [])
         previous_contexts = list(state.get("contexts") or [])
         per_subquery: list[list[Any]] = []
+        updated_subqueries: list[SubQuery] = []
 
         for subquery in subqueries:
             new_groups: list[list[Any]] = []
-            for query in _retrieval_queries(subquery):
-                if not query or query in tried_queries:
-                    continue
-
+            tried_queries = list(subquery.tried_queries)
+            attempts = subquery.attempts
+            query = (subquery.text or "").strip()
+            if query and query not in tried_queries:
+                search_failed = False
                 try:
                     chunks = rag.search_chunks(query)
                 except Exception as exc:
@@ -247,6 +209,7 @@ def make_retrieve_node(rag: RAG, settings: Settings) -> Node:
                         exc,
                     )
                     chunks = []
+                    search_failed = True
 
                 logger.info(
                     "RAG поиск: подзапрос=%s, запрос=%r, найдено=%s, chunk_ids=%s",
@@ -271,9 +234,9 @@ def make_retrieve_node(rag: RAG, settings: Settings) -> Node:
                     query_chunks.append(normalized)
                 if query_chunks:
                     new_groups.append(query_chunks)
-
-                if query not in tried_queries:
+                if not search_failed:
                     tried_queries.append(query)
+                    attempts += 1
 
             old_chunks = [
                 chunk
@@ -281,6 +244,11 @@ def make_retrieve_node(rag: RAG, settings: Settings) -> Node:
                 if subquery.id in chunk.subquery_ids
             ]
             per_subquery.append(_interleave_chunks([old_chunks, *new_groups]))
+            updated_subqueries.append(
+                subquery.model_copy(
+                    update={"tried_queries": tried_queries, "attempts": attempts}
+                )
+            )
 
         collected: list[Any] = []
         for subquery_chunks in per_subquery:
@@ -292,16 +260,15 @@ def make_retrieve_node(rag: RAG, settings: Settings) -> Node:
         merged_contexts = merge_contexts(collected)
         logger.info(
             "Контекст агента: подзапросы=%s, chunk_ids=%s",
-            [subquery.id for subquery in subqueries],
+            [subquery.id for subquery in updated_subqueries],
             [chunk.chunk_id for chunk in merged_contexts],
         )
 
         return {
-            "subqueries": subqueries,
+            "subqueries": updated_subqueries,
             # RAG/reranker уже определили состав и порядок выдачи. Агент
             # только дедуплицирует одинаковые chunk_id и ничего не отбрасывает.
             "contexts": merged_contexts,
-            "tried_queries": tried_queries,
             "retrieval_attempts": state.get("retrieval_attempts", 0) + 1,
         }
 
@@ -328,18 +295,8 @@ def make_grade_node(settings: Settings) -> Node:
                 budget_remaining=_budget_remaining(state, settings),
             )
             step_increment = 1
-        elif contexts:
-            result = fallback_grade(subqueries, contexts)
-            step_increment = 0
         else:
-            result = grade_retrieval(
-                question,
-                subqueries,
-                contexts,
-                settings=settings,
-                usage_sink=usage,
-                budget_remaining=_budget_remaining(state, settings),
-            )
+            result = fallback_grade(subqueries, contexts)
             step_increment = 0
 
         by_id = {item.subquery_id: item for item in result.subqueries}
@@ -364,8 +321,9 @@ def make_grade_node(settings: Settings) -> Node:
                 )
             )
 
-        clarification = None
-        if result.overall != "none":
+        if result.overall == "none":
+            clarification = state.get("clarification")
+        else:
             clarification = detect_context_ambiguity(
                 question,
                 state.get("history") or [],
@@ -375,13 +333,7 @@ def make_grade_node(settings: Settings) -> Node:
         return {
             "subqueries": updated,
             "coverage": result.overall,
-            "evidence_type": result.evidence_type,
-            "missing_aspects": result.missing_required_aspects,
             "missing_required_aspects": result.missing_required_aspects,
-            "missing_optional_details": result.missing_optional_details,
-            "unsupported_user_assumptions": (
-                result.unsupported_user_assumptions
-            ),
             "clarification": clarification,
             "total_steps": total_steps + step_increment,
             "used_tokens": _add_usage(state, usage),
@@ -400,15 +352,11 @@ def make_rewrite_node(settings: Settings) -> Node:
             subquery.model_copy(deep=True)
             for subquery in _subqueries(state)
         ]
-        tried_queries = list(state.get("tried_queries") or [])
-
         target_ids = {
             subquery.id
             for subquery in subqueries
-            if subquery.coverage != "full"
+            if subquery.coverage == "none" or subquery.coverage is None
         }
-        if not target_ids and subqueries:
-            target_ids = {subqueries[0].id}
 
         if verification is not None and verification.missing_evidence:
             next_id = max((subquery.id for subquery in subqueries), default=0) + 1
@@ -444,7 +392,7 @@ def make_rewrite_node(settings: Settings) -> Node:
         for subquery in subqueries:
             if (
                 subquery.id not in target_ids
-                or subquery.attempts >= 1
+                or subquery.attempts >= settings.max_retrieval_attempts
                 or rewrite_calls >= rewrite_limit
             ):
                 updated.append(subquery)
@@ -453,14 +401,20 @@ def make_rewrite_node(settings: Settings) -> Node:
             reason = "; ".join(subquery.missing_aspects)
             if not reason and verification is not None:
                 reason = verification.fix_hint or verification.reason
+            if not reason and subquery.coverage == "none":
+                reason = (
+                    "Нет релевантных чанков с ответом на подзапрос. "
+                    "Попробуйте синонимы и другую формулировку."
+                )
             if not reason:
                 reason = "Текущий контекст не покрывает подзапрос."
 
+            tried_queries = list(subquery.tried_queries)
             new_text = rewrite_subquery(
                 question,
                 subquery,
                 reason,
-                tried_queries,
+                list(tried_queries),
                 settings=settings,
                 usage_sink=usage,
                 budget_remaining=max(
@@ -473,33 +427,34 @@ def make_rewrite_node(settings: Settings) -> Node:
             rewrite_calls += 1
             new_text = (new_text or "").strip() or subquery.text
 
+            old_text = (subquery.text or "").strip()
+            if old_text and old_text not in tried_queries:
+                tried_queries.append(old_text)
+
             if new_text != subquery.text:
-                old_text = (subquery.text or "").strip()
-                variants = list(subquery.query_variants)
-                if old_text and old_text not in variants:
-                    variants.append(old_text)
                 updated.append(
                     subquery.model_copy(
                         update={
                             "text": new_text,
                             "coverage": None,
                             "missing_aspects": [],
-                            "query_variants": variants,
-                            "attempts": subquery.attempts + 1,
+                            "tried_queries": tried_queries,
                         }
                     )
                 )
             else:
                 updated.append(
                     subquery.model_copy(
-                        update={"attempts": subquery.attempts + 1}
+                        update={
+                            "tried_queries": tried_queries,
+                            "attempts": subquery.attempts + 1,
+                        }
                     )
                 )
 
         return {
             "subqueries": updated,
             "contexts": list(state.get("contexts") or []),
-            "tried_queries": tried_queries,
             "total_steps": state.get("total_steps", 0) + rewrite_calls,
             "used_tokens": _add_usage(state, usage),
         }
@@ -527,11 +482,6 @@ def make_generate_node(settings: Settings) -> Node:
             question,
             contexts,
             state.get("history") or [],
-            state.get("premise_check"),
-            state.get("coverage") or "none",
-            state.get("missing_required_aspects")
-            or state.get("missing_aspects")
-            or [],
             settings=settings,
             usage_sink=usage,
             budget_remaining=_budget_remaining(state, settings),
@@ -573,7 +523,6 @@ def make_verify_node(settings: Settings) -> Node:
                 question,
                 draft,
                 contexts,
-                state.get("premise_check"),
                 settings=settings,
                 usage_sink=usage,
                 budget_remaining=_budget_remaining(state, settings),
@@ -587,7 +536,6 @@ def make_verify_node(settings: Settings) -> Node:
                 question,
                 draft,
                 contexts,
-                state.get("premise_check"),
                 settings=settings,
                 usage_sink=usage,
                 budget_remaining=_budget_remaining(state, settings),
@@ -611,7 +559,6 @@ def make_clarify_node() -> Node:
         return {
             "answer": answer,
             "status": "clarification",
-            "messages": [AIMessage(content=answer)],
         }
 
     return clarify
@@ -669,7 +616,6 @@ def make_finalize_node() -> Node:
         return {
             "answer": answer,
             "status": status,
-            "messages": [AIMessage(content=answer)],
         }
 
     return finalize
@@ -683,7 +629,6 @@ def make_refuse_node() -> Node:
         return {
             "answer": answer,
             "status": "refused",
-            "messages": [AIMessage(content=answer)],
         }
 
     return refuse
@@ -709,23 +654,8 @@ def route_after_grade(state: AgentState, settings: Settings) -> str:
     total_steps = state.get("total_steps", 0)
     retrieval_attempts = state.get("retrieval_attempts", 0)
 
-    # При наличии контекста исправляем ложную предпосылку без нового поиска.
-    # Если контекст всё же есть, передаём его генерации даже при ошибочной
-    # оценке покрытия: противоречие пользователя может быть доказательством.
-    premise_check = state.get("premise_check")
-    if (
-        premise_check is not None
-        and premise_check.has_false_premise
-        and (coverage != "none" or state.get("contexts"))
-    ):
-        return "generate"
-
     clarification = state.get("clarification")
-    if (
-        coverage != "none"
-        and clarification is not None
-        and clarification.needed
-    ):
+    if clarification is not None and clarification.needed:
         return "clarify"
 
     if coverage == "full":
@@ -744,10 +674,11 @@ def route_after_grade(state: AgentState, settings: Settings) -> str:
         and total_steps < settings.max_total_llm_calls
     )
     can_rewrite = any(
-        subquery.coverage != "full" and subquery.attempts < 1
+        subquery.coverage == "none"
+        and subquery.attempts < settings.max_retrieval_attempts
         for subquery in state.get("subqueries", [])
     )
-    if coverage in {"partial", "none"} and can_retry and can_rewrite:
+    if coverage == "none" and can_retry and can_rewrite:
         return "rewrite"
     if (
         coverage == "none"
@@ -757,9 +688,7 @@ def route_after_grade(state: AgentState, settings: Settings) -> str:
         return "finalize"
     if coverage in {"partial", "none"} and total_steps < settings.max_total_llm_calls:
         return "generate"
-    if coverage == "none":
-        return "finalize"
-    return "generate" if total_steps < settings.max_total_llm_calls else "finalize"
+    return "finalize"
 
 
 def route_after_verify(state: AgentState, settings: Settings) -> str:

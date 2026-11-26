@@ -1,32 +1,31 @@
 services:
   backend:
-    volumes:
-      - psb-dataset:/app/dataset/data
-      - psb-models:/app/data/cache/embeddings
     build:
       context: .
       dockerfile: backend/Dockerfile
     container_name: psb-legal-backend
+    restart: unless-stopped
+    environment:
+      LLM_BASE_URL: ${LLM_BASE_URL:-}
+      LLM_API_KEY: ${LLM_API_KEY:-}
+      LLM_MODEL: ${LLM_MODEL:-}
+      OPENAI_BASE_URL: ${OPENAI_BASE_URL:-}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      OPENAI_MODEL: ${OPENAI_MODEL:-}
+      GEN_MODEL: ${GEN_MODEL:-}
+    volumes:
+      # Локальные эмбеддинги читаются с хоста, а не копируются в образ.
+      - ./models:/app/models:ro
     ports:
       - "8000:8000"
-    healthcheck:
-      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/health')"]
-      interval: 10s
-      timeout: 3s
-      retries: 5
-      start_period: 1200s
 
   frontend:
     build:
       context: .
       dockerfile: frontend/Dockerfile
     container_name: psb-legal-frontend
+    restart: unless-stopped
     ports:
       - "8080:80"
     depends_on:
-      backend:
-        condition: service_healthy
-
-volumes:
-  psb-dataset:
-  psb-models:
+      - backend

@@ -563,10 +563,7 @@ def run_case(case: ProbeCase, settings: Settings, repeat: int) -> ProbeResult:
     started_at = time.monotonic()
     try:
         service = AgentService(rag, settings=settings)
-        result = service._answer_sync(
-            f"probe-{case.case_id}-{repeat}",
-            case.question,
-        )
+        result = service._answer_sync(case.question)
     except Exception as exc:  # noqa: BLE001 - проба должна собрать все ошибки
         return ProbeResult(
             case_id=case.case_id,

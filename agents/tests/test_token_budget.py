@@ -8,7 +8,7 @@ from langchain_core.messages import HumanMessage, SystemMessage
 
 from agents.config import Settings
 from agents.llm import _chat_completion, generate_answer
-from agents.state import ContextChunk, PremiseCheck
+from agents.state import ContextChunk
 from agents.tokens import (
     TokenUsage,
     estimate_messages_tokens,
@@ -157,9 +157,6 @@ class ChatCompletionBudgetTest(unittest.TestCase):
         result = generate_answer(
             "вопрос",
             [make_context()],
-            [],
-            PremiseCheck(),
-            "full",
             [],
             settings=make_settings(),
             usage_sink=usage,

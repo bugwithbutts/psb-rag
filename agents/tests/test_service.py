@@ -35,8 +35,6 @@ def completion_responses() -> list[str]:
             '{"standalone_query":"налоги","in_scope":true,'
             '"scope_reason":"ok","is_complex":false,'
             '"question_parts":[{"id":1,"text":"налоги","kind":"fact"}],'
-            '"premise_check":{"has_false_premise":false,"false_premise":"",'
-            '"explanation":""},'
             '"subqueries":[{"id":1,"text":"налоги","part_ids":[1],'
             '"kind":"fact","required":true}]}'
         ),
@@ -90,7 +88,7 @@ class AgentServiceTest(unittest.TestCase):
         self.assertIn("LLM_API_KEY", str(raised.exception))
 
     def test_sync_answer_returns_generated_answer(self) -> None:
-        answer = self.service.answer("u-1", "налоги")
+        answer = self.service.answer("налоги")
 
         self.assertIn("[Договор]", answer)
         self.assertIn("Ответ по документу", answer)
@@ -98,48 +96,43 @@ class AgentServiceTest(unittest.TestCase):
         self.assertNotIn("doc_id", answer)
 
     def test_async_answer_returns_result(self) -> None:
-        result = asyncio.run(self.service.aanswer("u-1", "налоги"))
+        result = asyncio.run(self.service.aanswer("налоги"))
 
         self.assertIn("Ответ по документу", result.answer)
 
     def test_search_receives_standalone_subquery(self) -> None:
-        asyncio.run(self.service.aanswer("u-1", "налоги"))
+        asyncio.run(self.service.aanswer("налоги"))
 
         self.assertEqual(self.rag.calls, ["налоги"])
 
-    def test_memory_keeps_thread_history(self) -> None:
-        self.completion.side_effect = completion_responses() + completion_responses()
+    def test_answer_uses_fresh_minimal_state(self) -> None:
+        with patch.object(
+            self.service._graph,
+            "invoke",
+            return_value={"answer": "ok", "status": "answered"},
+        ) as invoke:
+            answer = self.service.answer("налоги")
 
-        asyncio.run(self.service.aanswer("u-1", "первый"))
-        asyncio.run(self.service.aanswer("u-1", "второй"))
-
-        state = self.service._graph.get_state(
-            {"configurable": {"thread_id": "u-1"}}
+        invoke.assert_called_once_with(
+            {"query": "налоги"},
+            config={"recursion_limit": 30},
         )
-
-        self.assertEqual(
-            [message.type for message in state.values["messages"]],
-            ["human", "ai", "human", "ai"],
-        )
+        self.assertEqual(answer, "ok")
 
     def test_empty_question_raises(self) -> None:
         with self.assertRaises(ValueError):
-            self.service.answer("u-1", "   ")
-
-    def test_empty_thread_id_raises(self) -> None:
-        with self.assertRaises(ValueError):
-            self.service.answer("", "вопрос")
+            self.service.answer("   ")
 
     def test_sync_answer_inside_event_loop_raises(self) -> None:
         async def call_sync() -> None:
             with self.assertRaises(RuntimeError):
-                self.service.answer("u-1", "вопрос")
+                self.service.answer("вопрос")
 
         asyncio.run(call_sync())
 
     def test_async_answer_works_inside_running_loop(self) -> None:
         async def call_async() -> None:
-            result = await self.service.aanswer("u-1", "налоги")
+            result = await self.service.aanswer("налоги")
             self.assertIn("Ответ по документу", result.answer)
 
         asyncio.run(call_async())

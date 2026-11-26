@@ -4,7 +4,6 @@ import unittest
 
 from agents.citations import (
     SourceRef,
-    append_sources,
     build_source_index,
     humanize_citations,
 )
@@ -142,57 +141,6 @@ class HumanizeCitationsTest(unittest.TestCase):
 
         self.assertEqual(answer, "Текст [Документ].")
         self.assertEqual([ref.label for ref in refs], ["Документ"])
-
-
-class AppendSourcesTest(unittest.TestCase):
-    def test_appends_sources_block(self) -> None:
-        answer = append_sources(
-            "Ответ.",
-            [
-                SourceRef("152-ФЗ, ст. 9", "Статья 9. Согласие субъекта"),
-                SourceRef("Договор аренды № А-08/2024", "Договор аренды"),
-            ],
-        )
-
-        self.assertIn("Ответ.", answer)
-        self.assertIn("Источники:", answer)
-        self.assertIn("- 152-ФЗ, ст. 9 — Статья 9. Согласие субъекта", answer)
-        self.assertIn("- Договор аренды № А-08/2024 — Договор аренды", answer)
-
-    def test_omits_title_when_it_matches_label(self) -> None:
-        answer = append_sources(
-            "Ответ.",
-            [SourceRef("152-ФЗ, ст. 9", "152-ФЗ, ст. 9")],
-        )
-
-        self.assertIn("- 152-ФЗ, ст. 9\n", answer + "\n")
-        self.assertNotIn("— 152-ФЗ", answer)
-
-    def test_omits_long_contract_header(self) -> None:
-        answer = append_sources(
-            "Ответ.",
-            [
-                SourceRef(
-                    "Договор аренды № А-08/2024",
-                    "ДОГОВОР АРЕНДЫ НЕЖИЛОГО ПОМЕЩЕНИЯ № А-08/2024 "
-                    "Московская область, г. Химки — 1 августа 2024 г. "
-                    "ООО «Северный Склад», именуемое в дальнейшем «Арендодатель»",
-                )
-            ],
-        )
-
-        self.assertIn("- Договор аренды № А-08/2024", answer)
-        self.assertNotIn("Московская область", answer)
-
-    def test_does_not_duplicate_existing_block(self) -> None:
-        text = "Ответ.\n\nИсточники:\n- 152-ФЗ, ст. 9"
-
-        answer = append_sources(text, [SourceRef("КоАП, ст. 13.11")])
-
-        self.assertEqual(answer, text)
-
-    def test_returns_answer_when_no_sources(self) -> None:
-        self.assertEqual(append_sources("Ответ.", []), "Ответ.")
 
 
 if __name__ == "__main__":

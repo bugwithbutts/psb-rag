@@ -8,8 +8,6 @@ from __future__ import annotations
 
 from typing import Any
 
-from langgraph.checkpoint.base import BaseCheckpointSaver
-
 from agents.config import Settings
 from agents.logging_setup import setup_logging
 # from agents.rag import SearchFn
@@ -21,7 +19,6 @@ __all__ = ["build_local_service"]
 def build_local_service(
     rag_client: Any,
     settings: Settings | None = None,
-    checkpointer: BaseCheckpointSaver | None = None,
 ) -> AgentService:
     """Собрать агент, подключённый к готовому RAG-индексу.
 
@@ -33,5 +30,4 @@ def build_local_service(
     return AgentService(
         rag_client,
         settings=settings,
-        checkpointer=checkpointer,
     )

@@ -1,130 +1,133 @@
 # Юридический ассистент ПСБ — чат-бот
 
-Чат-бот в браузере: задаёте вопрос, ответ приходит потоком (SSE) и печатается
-по токенам.
+Браузерный чат по внутренней базе знаний: вопрос уходит в FastAPI, ответ
+приходит потоком SSE и печатается по мере поступления. Диалог помнит контекст
+внутри вкладки, переживает F5 и удаляется вместе с вкладкой.
 
-> Демо-режим: **RAG** и **LLM** заменены одной заглушкой, которая на любой
-> вопрос возвращает одну и ту же строку. Место подключения реальных моделей —
-> `generate_answer()` в `backend/main.py`; интерфейс `AskEvent` менять не нужно.
+## Быстрый старт
+
+Нужен только Docker. Из корня репозитория:
+
+```bash
+docker compose up --build
+```
+
+- чат — http://localhost:8080
+- API — http://localhost:8000/api/health
+- документация — http://localhost:8000/docs
+
+Сборка образов, установка зависимостей и сборка фронтенда происходят внутри
+этой команды. Значения `LLM_*` Compose берёт из `.env` рядом с
+`docker-compose.yml`; сам файл в образ не копируется. Модель эмбеддингов
+монтируется из `./models`, а не копируется в образ.
+
+Проверка готовности:
+
+```bash
+curl http://localhost:8080/api/health
+# {"status":"ok","agent":true}
+```
+
+Эмбеддинги считаются локально (`models/multilingual-e5-small`), поэтому
+embedding-эндпоинт и его ключ не нужны — только чат-модель.
 
 ## Что умеет
 
-- Чат в браузере с потоковым выводом ответа (эффект печати).
-- Остановка генерации, копирование ответа, очистка чата, адаптивная вёрстка.
-- Минимальный API: `GET /`, `GET /api/health`, `POST /api/chat` (SSE).
+- потоковый ответ (`meta` → `token*` → `done`), остановка генерации, копирование;
+- отдельный диалог на каждую вкладку: `conversation_id` в `sessionStorage`;
+- восстановление истории после перезагрузки страницы;
+- удаление диалога при закрытии вкладки (beacon + 15-секундная задержка);
+- очистка диалога кнопкой «Очистить» (удаляет историю на сервере и выдаёт новый id);
+- локальные эмбеддинги без внешнего embedding-эндпоинта.
 
 ## Архитектура
 
 ```
 psb-rag/
-├── frontend/                    # React + TypeScript + Vite — браузерный чат-бот
-│   ├── src/
-│   │   ├── api/apiSse.ts        # чтение потока SSE
-│   │   ├── hooks/useChat.ts     # состояние чата и потоковый вывод
-│   │   └── components/…         # Header, Chat, MessageBubble, Composer
-│   ├── Dockerfile               # сборка и раздача через nginx
-│   └── nginx.conf               # прокси /api → backend, SSE без буферизации
-├── backend/                     # FastAPI-заглушка
-│   ├── main.py                  # /api/chat, /api/health, generate_answer()
-│   ├── test_main.py             # pytest-тесты
+├── frontend/                 # React + TypeScript + Vite
+│   ├── src/App.tsx           # интерфейс и состояние чата
+│   ├── src/api.ts            # SSE, история, id вкладки
+│   ├── Dockerfile            # сборка и раздача через nginx
+│   └── nginx.conf            # прокси /api → backend без буферизации
+├── backend/                  # FastAPI: HTTP-слой и память диалогов
+│   ├── main.py               # /api/chat, /api/conversations/*, warm_up()
+│   ├── test_main.py          # pytest: поток и история
 │   └── Dockerfile
-├── rag/                         # зона реального RAG (см. rag/README.md)
-├── agents/                      # зона реальных LLM-агентов (см. agents/README.md)
-├── dataset/                     # данные: raw / processed / index (не в образе)
+├── rag/                      # поиск: BM25, FAISS, гибрид, реранкер
+├── agents/                   # LangGraph-агент: разбор диалога, генерация
+├── models/multilingual-e5-small # локальная модель эмбеддингов
+├── dataset/result_chunks.csv # готовый корпус чанков (680 строк, 21 документ)
 ├── docker-compose.yml
-└── README.md
+└── .env.example              # только имена переменных, без значений
 ```
 
-Бэкенд общается с UI через события `AskEvent`:
+Поток запроса:
 
-- `token` — ассистент печатает ответ по токенам;
-- `done` — итоговый ответ и время генерации.
+1. фронтенд отправляет только новое сообщение и `conversation_id`;
+2. бэкенд достаёт историю из памяти процесса, обрезает её (8 реплик / 6000
+   символов) и склеивает в строку с метками `Пользователь:` / `Ассистент:`;
+3. агент детерминированно разбирает строку (`agents/dialog.py`), ищет чанки
+   в RAG и генерирует ответ;
+4. бэкенд сохраняет ответ в историю и отдаёт его потоком SSE.
 
-Когда появятся реальные модели, меняется только `generate_answer()` в
-`backend/main.py` (и папки `rag/`, `agents/`), фронтенд не трогаем.
-
-## Запуск бэкенда
-
-```bash
-cd backend
-python -m venv .venv
-# Windows: .venv\Scripts\activate
-source .venv/bin/activate
-pip install -r requirements.txt
-uvicorn main:app --reload --port 8000
-```
-
-Проверка: `GET /api/health`, документация — http://127.0.0.1:8000/docs.
-
-## Настройка переменных окружения
-
-В репозитории хранится только шаблон `.env.example` — **с именами переменных
-и пустыми значениями**. Никогда не добавляйте в него ключи и другие секреты.
-
-1. Создайте локальный файл `.env` в корне проекта:
-
-   ```bash
-   cp .env.example .env
-   chmod 600 .env
-   ```
-
-2. Откройте `.env` и заполните значения:
-
-   ```env
-   LLM_BASE_URL=<адрес OpenAI-совместимого API>
-   LLM_API_KEY=<ваш ключ>
-   LLM_MODEL=<идентификатор модели>
-   ```
-
-3. `.env` не коммитится и не попадает в Docker-образ. У каждого разработчика
-   свой локальный `.env`.
-
-4. На тестовой платформе `.env` не нужен: переменные окружения подставляет
-   платформа.
-
-Проверить настройки без вывода ключа:
-
-```bash
-.venv/bin/python -c "from agents.config import get_settings; s=get_settings(); print('base_url:', s.llm_base_url, 'model:', s.llm_model, 'key_set:', bool(s.llm_api_key))"
-```
-
-Если `LLM_API_KEY` не задан, приложение работает на RAG-fallback и пишет
-предупреждение в консоль.
-
-### API
+## API
 
 | Метод | Путь | Назначение |
 | --- | --- | --- |
 | `GET` | `/` | описание сервиса |
-| `GET` | `/api/health` | статус |
-| `POST` | `/api/chat` | поток SSE: `token*` → `done` |
+| `GET` | `/api/health` | статус, режим поиска, число диалогов |
+| `POST` | `/api/chat` | поток SSE: `meta` → `token*` → `done` |
+| `GET` | `/api/conversations/{id}` | история диалога |
+| `DELETE` | `/api/conversations/{id}` | удалить диалог |
+| `POST` | `/api/conversations/{id}/close` | сигнал «вкладка закрылась» |
 
-## Запуск фронтенда
+```bash
+curl -N http://localhost:8080/api/chat \
+  -H "Content-Type: application/json" \
+  -d '{"query":"Какая арендная плата по договору аренды?","conversation_id":"tab-1"}'
+```
 
-Требуется Node.js 18+ и pnpm (или npm).
+Подробнее о событиях и жизненном цикле диалога — `backend/README.md`.
+
+## Переменные окружения
+
+Шаблон — `.env.example` (только имена). Локальный `.env` в корне:
+
+```env
+LLM_BASE_URL=https://api.siliconflow.com/v1
+LLM_API_KEY=...
+LLM_MODEL=deepseek-ai/DeepSeek-V3
+```
+
+- `LLM_*` (или `OPENAI_*`) — чат-модель;
+- эмбеддинги локальные и настраиваются в `backend/main.py`;
+- остальные лимиты (`HISTORY_LIMIT`, `MAX_*`) необязательны, значения по
+  умолчанию заданы в коде.
+
+`.env` не коммитится и не попадает в образ. На стенде значения подставляет
+платформа; переменные окружения имеют приоритет над `.env`.
+
+## Локальная разработка
+
+Бэкенд:
+
+```bash
+python -m venv .venv
+.venv\Scripts\activate           # Windows, или source .venv/bin/activate
+pip install -r backend/requirements-dev.txt
+cd backend
+uvicorn main:app --reload --port 8000
+```
+
+Фронтенд (Node.js 18+):
 
 ```bash
 cd frontend
-pnpm install     # или npm install
-pnpm dev         # или npm run dev
+npm install
+npm run dev                      # http://localhost:5173, /api проксируется на :8000
 ```
 
-Откройте http://localhost:5173. Vite проксирует `/api/*` на
-`http://127.0.0.1:8000`, поэтому бэкенд должен быть запущен.
-
-## Запуск в Docker
-
-```bash
-docker compose up --build -d
-```
-
-- чат: http://localhost:8080
-- API: http://localhost:8000/api/health
-
-Nginx раздаёт собранный фронтенд и проксирует `/api/` на контейнер `backend`.
-Буферизация для SSE отключена, поэтому ответ приходит по токенам.
-
-## Тесты бэкенда
+## Тесты
 
 ```bash
 cd backend
@@ -132,14 +135,21 @@ pip install -r requirements-dev.txt
 pytest -q
 ```
 
-## Сборка для продакшена
+Тесты не поднимают реальный RAG: агент подменяется заглушкой, проверяются
+поток SSE, накопление и изоляция истории, восстановление после перезагрузки,
+закрытие вкладки и вырезание `Источники:`.
+
+## Docker: детали
 
 ```bash
-cd frontend
-pnpm build      # tsc --noEmit + vite build → dist/
-pnpm preview    # локальный просмотр собранного бандла
+docker compose up --build        # собрать и запустить
+docker compose logs -f backend   # логи RAG и агента
+docker compose down              # остановить
 ```
+
+Логи приложения отключены, отдельного healthcheck в Compose нет: Docker не
+опрашивает `/api/health` каждые 10 секунд.
 
 ## Стек
 
-React · TypeScript · Vite · FastAPI · SSE · Docker · nginx
+React · TypeScript · Vite · FastAPI · LangGraph · BM25 + FAISS · SSE · Docker · nginx

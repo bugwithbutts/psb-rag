@@ -139,7 +139,7 @@ def main() -> None:
 
     def work(position: int, question: str) -> tuple[int, str]:
         try:
-            return position, service.answer(str(position), question)
+            return position, service.answer(question)
         except Exception as exc:
             print(f"Ошибка вопроса {position}: {type(exc).__name__}: {exc}", file=sys.stderr)
             return position, FALLBACK
